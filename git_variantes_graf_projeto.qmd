@@ -1,0 +1,1276 @@
+---
+title: "github_variantes_graf_projeto"
+author: "AndreVeloso"
+format: html
+editor: visual
+---
+
+## Script Geral
+
+```{r}
+##1. NEUROIMAGEM
+
+##1.1 Abri o arquivo .rds com os dados de neuroimagem que irei trabalhar. Para funcionar o comando, é necessário escrever o caminho do arquivo com barra normal (/) ou barra dupla (\\)
+
+dados_neuroimagem <- readRDS("C:\\Andre_faculdade\\IC\\Dados\\Lucas_Neuroimagem_BHRCS.rds")
+dados_neuroimagem_cópia <- readRDS("C:\\Andre_faculdade\\IC\\Dados\\Lucas_Neuroimagem_BHRCS.rds") ##fiz uma cópia por garantia
+
+
+##1.2 Criei um objeto com o nome das colunas selecionadas e pedi seus números
+##Obs: para observar todas as colunas do dataframe, uso o comando names(dados_neuroimagem)
+
+colunas_selecionadas <- c('ident', 'subjectid', 'FID', 'IID', 'wave', 'site', 'gender', 'selection', 'nage', 'ni_id', 'ni_lh_meanthickness_thickness', 'ni_rh_meanthickness_thickness', 'ni_lhcortexvol', 'ni_rhcortexvol', 'ni_cortexvol', 'ni_lhcerebralwhitemattervol', 'ni_rhcerebralwhitemattervol', 'ni_cerebralwhitemattervol', 'ni_estimatedtotalintracranialvol')
+
+num_col_ni <- which(names(dados_neuroimagem) %in% colunas_selecionadas)
+paste(num_col_ni, collapse = ',') ##saída com os números das colunas pronto para jogar no próximo comando
+
+
+##1.3 Limpeza da tabela
+
+dados_neuroimagem <- dados_neuroimagem [, c(1,2,3,4,5,6,7,8,12,23,198,233,348,349,350,351,352,353,364)]
+str(dados_neuroimagem)
+
+
+
+
+##2. VARIANTES
+
+##2.1 Abri o arquivo .vcf das variantes
+
+if (!requireNamespace("vcfR", quietly = TRUE))
+  install.packages("vcfR")
+library('vcfR')
+
+variantes_projeto <- read.vcfR("C:\\Andre_faculdade\\IC\\Dados\\variantes_final.vcf") ##abre o arquivo .vcf
+info_variantes_projeto <- as.data.frame(variantes_projeto@fix) ##transforma as infos de cada variante em dataframe
+gt_variantes_projeto <- extract.gt(variantes_projeto)
+gt_variantes_projeto <- as.data.frame(gt_variantes_projeto) ##transforma os genótipos de cada indivíduo em dataframe
+
+
+
+##3. HARMONIZAR DADOS VARIANTES/NEUROIMAGEM
+
+##3.1 Retirei todas as linhas que apresentavam NA
+
+dados_neuroimagem <- na.omit(dados_neuroimagem)
+
+
+##3.2 Unifiquei os dados em uma tabela com IDs em comum
+
+if (!requireNamespace("dplyr", quietly = TRUE))
+  install.packages("dplyr")
+library('dplyr')
+library('tibble')
+
+colnames(gt_variantes_projeto) <- sub("^0_", "", colnames(gt_variantes_projeto)) ##Limpa o nome das colunas que começam com "0_"
+colnames(gt_variantes_projeto)
+
+id_comum <- intersect(colnames(gt_variantes_projeto), dados_neuroimagem$IID) ##cria um character para IDs em comum
+id_comum
+
+filt_gt_variantes <- gt_variantes_projeto %>% ##filtra o dataframe de genótipos para IDs em comum
+  select(all_of(id_comum))
+filt_dados_neuroimagem <- dados_neuroimagem %>% #filtra o dataframe de neuromimagem para IDs em comum
+  filter(IID %in% id_comum)
+
+filt_gt_variantes <- t(filt_gt_variantes) ##inverte o filtrado do vcf
+filt_gt_variantes <- as.data.frame(filt_gt_variantes)
+filt_gt_variantes$IID <- rownames(filt_gt_variantes) ##cria uma coluna com os IIDs para a próxima etapa
+
+final_tabela <- filt_dados_neuroimagem %>% 
+  left_join(filt_gt_variantes, by = 'IID') ##junta os dados de genotipagem com neuroimagem em uma única tabela
+which(is.na(final_tabela), arr.ind = TRUE) ##verificar se há algum NA
+
+
+
+
+##4. ASSOCIAÇÃO DE VARIANTES E NEUROIMAGEM
+
+final_tabela$ni_meanthickness_thickness <- rowMeans(final_tabela[, c(11,12)], na.rm = TRUE)
+final_tabela <- final_tabela[, c(1:12, ncol(final_tabela), 13:(ncol(final_tabela)-1))] ##criando uma coluna para média da expessura cortical
+final_tabela <- final_tabela[, -c(11, 12, 14, 15, 17, 18)] #teste para 3 áreas
+
+##4.1Transformei os genótipos em fator
+final_tabela[,c("rs9307869", "rs17809993", "rs7926036", "rs9592802", "rs490752", "rs303935", "rs303932", "rs303931")] <- 
+  lapply(final_tabela[,c("rs9307869", "rs17809993", "rs7926036", "rs9592802", "rs490752", "rs303935", "rs303932", "rs303931")],
+         as.factor)
+str(final_tabela)
+
+
+#Extra: Verifiquei as waves presentes para os IDs
+
+ids_3waves <- final_tabela %>%
+  group_by(IID) %>%
+  summarise(n_waves = n_distinct(wave)) %>%
+  filter(n_waves == 3)
+str(ids_3waves)
+##237 indivíduos com 3 waves
+
+ids_2waves <- final_tabela %>%
+  group_by(IID) %>%
+  summarise(n_waves = n_distinct(wave)) %>%
+  filter(n_waves == 2)
+str(ids_2waves)
+##296 indivíduos com 2 waves
+
+ids_1waves <- final_tabela %>%
+  group_by(IID) %>%
+  summarise(n_waves = n_distinct(wave)) %>%
+  filter(n_waves == 1)
+str(ids_1waves)
+##262 indivíduos com 1 wave
+```
+
+## Modelo aditivo
+
+Cross sectional - modelo aditivo
+
+```{r}
+#| label: cross additive model - preparando tabela
+
+library(dplyr)
+library(purrr)
+library(broom)
+
+add_final_tabela <- final_tabela %>% 
+  mutate(across(15:22, ~ recode(.x,
+                                '0/0'=0,
+                                '0/1'=1,
+                                '1/1'=2) %>% as.numeric()))
+```
+
+```{r}
+#| label: cross additive model - geral
+
+library(dplyr)
+library(purrr)
+library(broom)
+
+variantes <- c("rs9307869",
+               "rs17809993", 
+               "rs7926036", 
+               "rs9592802", 
+               "rs490752", 
+               "rs303935", 
+               "rs303932", 
+               "rs303931")
+
+brain_areas <- c("ni_meanthickness_thickness",
+                 "ni_cortexvol",
+                 "ni_cerebralwhitemattervol")
+
+wave_tabela <- unique(add_final_tabela$wave)
+
+
+
+results_df <- list()
+
+for (wave_cross in wave_tabela){
+  
+  add_final_tabela_filt <- subset(add_final_tabela, wave == wave_cross)
+  
+  for (snp in variantes) {
+    for(area in brain_areas){
+
+      form <- as.formula(
+        paste(area, "~", snp, "+ nage + gender + ni_estimatedtotalintracranialvol")
+      )
+      
+      cross <- lm(form, data = add_final_tabela_filt)
+      tidy_res <- broom::tidy(cross)
+
+      # pegar apenas a linha do SNP
+      snp_row <- tidy_res %>% filter(term == snp)
+
+      # salvar num data.frame temporário
+      results_df[[paste(wave_cross, snp, area, sep = "_")]] <- 
+        data.frame(
+          wave = wave_cross,
+          snp = snp,
+          brain_area = area,
+          estimate = snp_row$estimate,
+          p_value = snp_row$p.value
+        )
+    }
+  }
+}
+
+# juntar tudo
+results_df <- bind_rows(results_df)
+
+#Ajuste do p-valor (FDR)
+#results_df <- results_df %>% 
+ # mutate(p_value = p.adjust(p_value, method = "fdr"))
+
+# filtrar só significativos
+cross_gen_signif_results <- results_df %>% filter(p_value < 0.05)
+```
+
+```{r}
+#| label: cross additive model - sex
+library(dplyr)
+library(purrr)
+library(broom)
+
+variantes <- c("rs9307869",
+               "rs17809993", 
+               "rs7926036", 
+               "rs9592802", 
+               "rs490752", 
+               "rs303935", 
+               "rs303932", 
+               "rs303931")
+
+brain_areas <- c("ni_meanthickness_thickness",
+                 "ni_cortexvol",
+                 "ni_cerebralwhitemattervol")
+
+
+
+wave_tabela <- unique(add_final_tabela$wave)
+
+results_df <- list()
+
+sexos <- unique(add_final_tabela$gender)
+
+for (wave_cross in wave_tabela){
+  
+  for (sex in sexos){
+    
+    add_filt <- add_final_tabela %>% 
+      filter(wave == wave_cross, gender == sex)
+    
+    for (snp in variantes) {
+      for(area in brain_areas){
+
+        form <- as.formula(
+          paste(area, "~", snp, "+ nage + ni_estimatedtotalintracranialvol")
+        )
+        
+        cross <- lm(form, data = add_filt)
+        tidy_res <- broom::tidy(cross)
+
+        snp_row <- tidy_res %>% filter(term == snp)
+
+        results_df[[paste(wave_cross, sex, snp, area, sep = "_")]] <- 
+          data.frame(
+            wave = wave_cross,
+            gender = sex,
+            snp = snp,
+            brain_area = area,
+            estimate = snp_row$estimate,
+            p_value = snp_row$p.value
+          )
+      }
+    }
+  }
+}
+
+results_df <- bind_rows(results_df)
+
+#Ajuste do p-valor (FDR)
+#results_df <- results_df %>% 
+ # mutate(p_value = p.adjust(p_value, method = "fdr"))
+
+# apenas significativos
+cross_sex_signif_results <- results_df %>% filter(p_value < 0.05)
+```
+
+Longituginal - modelo aditivo
+
+```{r}
+#| label: long additive model - preparando a tabela
+
+library(dplyr)
+library(tidyr)
+
+##Filtrei somente os indivíduos que apresentavam as waves 1 e 2
+
+ondas <- c('Wave1', 'Wave2')
+
+long_add_final_tabela <- add_final_tabela %>%
+  filter(wave %in% ondas)
+long_IID <- long_add_final_tabela %>% 
+  group_by(IID) %>% 
+  summarise(n_waves = n_distinct(wave)) %>% 
+  filter(n_waves == 2)
+
+
+long_IID <- as.vector(long_IID$IID)
+##273 indivíduos ao final para a análise longitudinal
+
+long_add_final_tabela <- long_add_final_tabela %>% 
+  filter(IID %in% long_IID)
+
+##Criei uma tabela com os valores de delta
+delta_long_tabela <- long_add_final_tabela %>% 
+  select(IID,
+         wave,
+         ni_meanthickness_thickness,
+         ni_cortexvol,
+         ni_cerebralwhitemattervol) %>% 
+  pivot_wider(
+    names_from = wave,
+    values_from = c(ni_meanthickness_thickness,
+                    ni_cortexvol,
+                    ni_cerebralwhitemattervol)
+  ) %>%
+  group_by(IID) %>%
+  mutate(across(
+    ends_with("Wave2"),
+    ~ . - get(sub("_Wave2$", "_Wave1", cur_column())),
+    .names = "delta_{.col}"
+  ))
+
+##Juntei alguns dados importantes na tabela de delta
+l <- long_add_final_tabela %>% 
+  filter(wave == 'Wave2')
+delta_long_tabela <-  
+  left_join(
+  delta_long_tabela,
+  l[,c(4, 6, 7, 9, 14:22)],
+  by = 'IID')
+delta_long_tabela <- delta_long_tabela[
+  !duplicated(
+    delta_long_tabela$IID
+    ),
+  ]
+delta_long_tabela <- delta_long_tabela[, -c(2:7)] %>% 
+  relocate(site,
+           gender,
+           nage,
+           ni_estimatedtotalintracranialvol,
+           .after = IID)
+
+colnames(delta_long_tabela) <- gsub('_Wave2$','', colnames(delta_long_tabela))
+  
+
+
+remove(ondas, long_IID, l)
+```
+
+```{r}
+#| label: long additive model - geral
+
+library(dplyr)
+library(purrr)
+library(broom)
+
+variantes <- c("rs9307869",
+               "rs17809993", 
+               "rs7926036", 
+               "rs9592802", 
+               "rs490752", 
+               "rs303935", 
+               "rs303932", 
+               "rs303931")
+
+brain_vol <- c("delta_ni_meanthickness_thickness",
+               "delta_ni_cortexvol",
+               "delta_ni_cerebralwhitemattervol")
+
+
+results_df <- list()
+
+
+    for (snp in variantes) {
+      for(delta in brain_vol){
+
+        form <- as.formula(paste(delta, "~", snp, "+ nage + gender"))
+        
+        long <- lm(form, data = delta_long_tabela)
+        tidy_res <- broom::tidy(long)
+
+        snp_row <- tidy_res %>% filter(term == snp)
+
+        results_df[[paste(snp, delta, sep = "_")]] <- 
+          data.frame(
+            snp = snp,
+            delta = delta,
+            estimate = snp_row$estimate,
+            p_value = snp_row$p.value
+          )
+      }
+    }
+
+results_df <- bind_rows(results_df)
+
+#Ajuste do p-valor (FDR)
+#results_df <- results_df %>% 
+ # mutate(p_value = p.adjust(p_value, method = "fdr"))
+
+# apenas significativos
+long_gen_signif_results <- results_df %>% filter(p_value < 0.05)
+```
+
+```{r}
+#| label: long additive model - sex
+
+library(dplyr)
+library(purrr)
+library(broom)
+
+variantes <- c("rs9307869",
+               "rs17809993", 
+               "rs7926036", 
+               "rs9592802", 
+               "rs490752", 
+               "rs303935", 
+               "rs303932", 
+               "rs303931")
+
+brain_vol <- c("delta_ni_meanthickness_thickness",
+               "delta_ni_cortexvol",
+               "delta_ni_cerebralwhitemattervol")
+
+
+results_df <- list()
+
+sexos <- unique(delta_long_tabela$gender) 
+
+
+  for (sex in sexos){
+    
+    delta_filt <- delta_long_tabela %>% 
+      filter(gender == sex)
+    
+    for (snp in variantes) {
+      for(delta in brain_vol){
+
+        form <- as.formula(paste(delta, "~", snp, "+ nage"))
+        
+        long <- lm(form, data = delta_filt)
+        tidy_res <- broom::tidy(long)
+
+        snp_row <- tidy_res %>% filter(term == snp)
+
+        results_df[[paste(sex, snp, delta, sep = "_")]] <- 
+          data.frame(
+            gender = sex,
+            snp = snp,
+            delta = delta,
+            estimate = snp_row$estimate,
+            p_value = snp_row$p.value
+          )
+      }
+    }
+  }
+
+results_df <- bind_rows(results_df)
+
+#Ajuste do p-valor (FDR)
+#results_df <- results_df %>% 
+ # mutate(p_value = p.adjust(p_value, method = "fdr"))
+
+# apenas significativos
+long_sex_signif_results <- results_df %>% filter(p_value < 0.05)
+```
+
+Taxa de crescimento longitudinal - modelo aditivo
+
+```{r}
+#| label: Taxa de crescimento long additive model - preparando a tabela
+
+library(dplyr)
+library(tidyr)
+
+##Criei uma tabela com os valores de delta
+brower_long_tabela <- long_add_final_tabela %>% 
+  select(IID,
+         nage,
+         wave,
+         ni_meanthickness_thickness,
+         ni_cortexvol,
+         ni_cerebralwhitemattervol) %>% 
+  pivot_wider(
+    names_from = wave,
+    values_from = c(nage,
+                    ni_meanthickness_thickness,
+                    ni_cortexvol,
+                    ni_cerebralwhitemattervol)
+  ) %>%
+  group_by(IID) %>%
+  mutate(across(
+    ends_with("Wave2"),
+    ~ . - get(sub("_Wave2$", "_Wave1", cur_column())),
+    .names = "delta_{.col}"
+  ))
+
+##Juntei alguns dados importantes na tabela de delta
+l <- long_add_final_tabela %>% 
+  filter(wave == 'Wave2')
+brower_long_tabela <-  
+  left_join(
+  brower_long_tabela,
+  l[,c(4, 6, 7, 14:22)],
+  by = 'IID')
+brower_long_tabela <- brower_long_tabela[
+  !duplicated(
+    delta_long_tabela$IID
+    ),
+  ]
+brower_long_tabela <- brower_long_tabela[, -c(2, 4:9)] %>% 
+  relocate(site,
+           gender,
+           ni_estimatedtotalintracranialvol,
+           .after = IID)
+
+##Criando o growth rate
+
+delta <- c(
+  "delta_ni_meanthickness_thickness_Wave2",
+  "delta_ni_cortexvol_Wave2",
+  "delta_ni_cerebralwhitemattervol_Wave2")
+
+brower_long_tabela <- brower_long_tabela %>%
+  mutate(across(all_of(delta),
+                ~ .x / delta_nage_Wave2))
+
+colnames(brower_long_tabela)[-6] <- colnames(brower_long_tabela)[-6] %>% 
+  gsub("^delta", "gr", .) %>% 
+  gsub('_Wave2', '', .)
+  
+
+remove(l, delta)
+```
+
+```{r}
+#| label: Taxa de crescimento long additive model - geral
+
+library(dplyr)
+library(purrr)
+library(broom)
+
+variantes <- c("rs9307869",
+               "rs17809993", 
+               "rs7926036", 
+               "rs9592802", 
+               "rs490752", 
+               "rs303935", 
+               "rs303932", 
+               "rs303931")
+
+brain_vol <- c("gr_ni_meanthickness_thickness",
+               "gr_ni_cortexvol",
+               "gr_ni_cerebralwhitemattervol")
+
+
+results_df <- list()
+
+
+    for (snp in variantes) {
+      for(gr in brain_vol){
+
+        form <- as.formula(paste(gr, "~", snp, "+ nage + gender"))
+        
+        long <- lm(form, data = brower_long_tabela)
+        tidy_res <- broom::tidy(long)
+
+        snp_row <- tidy_res %>% filter(term == snp)
+
+        results_df[[paste(snp, gr, sep = "_")]] <- 
+          data.frame(
+            snp = snp,
+            growth_rate = gr,
+            estimate = snp_row$estimate,
+            p_value = snp_row$p.value
+          )
+      }
+    }
+
+results_df <- bind_rows(results_df)
+
+#Ajuste do p-valor (FDR)
+#results_df <- results_df %>% 
+ # mutate(p_value = p.adjust(p_value, method = "fdr"))
+
+# apenas significativos
+gr_gen_signif_results <- results_df %>% filter(p_value < 0.05)
+```
+
+```{r}
+#| label: Taxa de crescimento long additive model - sex
+
+library(dplyr)
+library(purrr)
+library(broom)
+
+variantes <- c("rs9307869",
+               "rs17809993", 
+               "rs7926036", 
+               "rs9592802", 
+               "rs490752", 
+               "rs303935", 
+               "rs303932", 
+               "rs303931")
+
+brain_vol <- c("gr_ni_meanthickness_thickness",
+               "gr_ni_cortexvol",
+               "gr_ni_cerebralwhitemattervol")
+
+
+results_df <- list()
+
+sexos <- unique(brower_long_tabela$gender) 
+
+
+  for (sex in sexos){
+    
+    brower_filt <- brower_long_tabela %>% 
+      filter(gender == sex)
+    
+    for (snp in variantes) {
+      for(gr in brain_vol){
+
+        form <- as.formula(paste(gr, "~", snp, "+ nage"))
+        
+        long <- lm(form, data = brower_filt)
+        tidy_res <- broom::tidy(long)
+
+        snp_row <- tidy_res %>% filter(term == snp)
+
+        results_df[[paste(sex, snp, gr, sep = "_")]] <- 
+          data.frame(
+            gender = sex,
+            snp = snp,
+            growth_rate = gr,
+            estimate = snp_row$estimate,
+            p_value = snp_row$p.value
+          )
+      }
+    }
+  }
+
+results_df <- bind_rows(results_df)
+
+#Ajuste do p-valor (FDR)
+#results_df <- results_df %>% 
+ # mutate(p_value = p.adjust(p_value, method = "fdr"))
+
+# apenas significativos
+gr_sex_signif_results <- results_df %>% filter(p_value < 0.05)
+```
+
+## Gráfico de dispersão variantes
+
+Transversal - gráfico de dispersão
+
+```{r}
+#| label: Cross_gen_scatterplot - rs7926036
+library(ggplot2)
+library(dplyr)
+
+n_genotipo <- final_tabela %>%
+  filter(wave == 'Wave2') %>% 
+  group_by(rs7926036) %>%
+  summarise(n = n())
+
+ggplot(final_tabela %>% 
+         filter (wave == 'Wave2'),
+       aes(x = factor(rs7926036),
+           y = ni_cerebralwhitemattervol),
+       ) +
+  
+  coord_cartesian(ylim = c(200000, 700000)) +
+  
+  geom_point(aes(color = gender),
+             size = 2,
+             alpha = 0.7,
+             position = position_jitter(width = 0.15)) +
+  
+  stat_summary(aes(color = 'Média'),
+               fun = mean,
+               geom = "crossbar",
+               width = 0.5,
+               fatten = 0,
+               linewidth = 1) +
+  
+  geom_text(data = n_genotipo,
+            aes(x = factor(rs7926036),
+                y = -Inf,
+                label = paste0("n = ", n)),
+            inherit.aes = FALSE,
+            vjust = -18,
+            size = 3.5) +
+  
+  labs(title = 'Volume da substância branca x rs7926036 - Wave 2',
+       subtitle = expression(
+         'Freq. allele A = 7,53% / ' *
+          p[hwe] * ' = 0.1985 / ' *
+          p[asoc] * ' = 0.0349 / ' *
+          'β = 6869.47'
+         ),
+       x = 'rs7926036',
+       y = 'Volume da substância branca (mm³)') +
+  
+  scale_color_manual(values = c(
+  "Média" = "black",
+  "Male"  = "#4E79A7",
+  "Female" = "#E15759"
+  )) +
+  
+  theme_minimal(base_size = 12) +
+  
+  theme(
+    plot.title   = element_text(
+      hjust = 0.5,
+      size = 13,
+      face = "bold"
+      ),
+    plot.subtitle = element_text(
+      hjust = 0.5,
+      size  = 11,
+      face  = "italic",
+      margin = margin(b = 10)
+      ),
+    axis.title.x = element_text(
+      face = "bold",
+      size = 10,
+      margin = margin(t = 10)
+      ),
+    axis.title.y = element_text(
+      face = "bold",
+      size = 10,
+      margin = margin(r = 10)
+      ),
+    
+    legend.position = "top",
+    legend.title = element_blank(),
+    legend.text  = element_text(size = 10),
+    plot.margin = margin(10, 10, 10, 10)
+  )
+```
+
+```{r}
+#| label: Cross_male_scatterplot - rs7926036
+
+library(ggplot2)
+library(dplyr)
+
+n_genotipo <- final_tabela %>%
+  filter(wave == 'Wave2' & gender == 'Male') %>% 
+  group_by(rs7926036) %>%
+  summarise(n = n())
+
+ggplot(final_tabela %>% 
+         filter (wave == 'Wave2' & gender == 'Male'),
+       aes(x = factor(rs7926036),
+           y = ni_cerebralwhitemattervol),
+       ) +
+  
+  coord_cartesian(ylim = c(200000, 700000)) +
+  
+  geom_point(aes(color = gender),
+             size = 2,
+             alpha = 0.7,
+             position = position_jitter(width = 0.15)) +
+  
+  stat_summary(aes(color = 'Média'),
+               fun = mean,
+               geom = "crossbar",
+               width = 0.5,
+               fatten = 0,
+               linewidth = 1) +
+  
+  geom_text(data = n_genotipo,
+            aes(x = factor(rs7926036),
+                y = -Inf,
+                label = paste0("n = ", n)),
+            inherit.aes = FALSE,
+            vjust = -18,
+            size = 3.5) +
+  
+  labs(title = 'Volume da substância branca x rs7926036 - Wave 2',
+       subtitle = expression(
+         'Freq. allele A = 7,53% / ' *
+          p[hwe] * ' = 0.1985 / ' *
+          p[asoc] * ' = 0.0314 / ' *
+          'β = 9892.781'
+         ),
+       x = 'rs7926036',
+       y = 'Volume da substância branca (mm³)') +
+  
+  scale_color_manual(values = c(
+  "Média" = "black",
+  "Male"  = "#4E79A7",
+  "Female" = "#E15759"
+  )) +
+  
+  theme_minimal(base_size = 12) +
+  
+  theme(
+    plot.title   = element_text(
+      hjust = 0.5,
+      size = 13,
+      face = "bold"
+      ),
+    plot.subtitle = element_text(
+      hjust = 0.5,
+      size  = 11,
+      face  = "italic",
+      margin = margin(b = 10)
+      ),
+    axis.title.x = element_text(
+      face = "bold",
+      size = 10,
+      margin = margin(t = 10)
+      ),
+    axis.title.y = element_text(
+      face = "bold",
+      size = 10,
+      margin = margin(r = 10)
+      ),
+    
+    legend.position = "top",
+    legend.title = element_blank(),
+    legend.text  = element_text(size = 10),
+    plot.margin = margin(10, 10, 10, 10)
+  )
+```
+
+Longitudinal - gráfico de dispersão
+
+```{r}
+#| label: Long_female_scatterplot - rs9592802
+library(ggplot2)
+library(dplyr)
+
+n_genotipo <- delta_long_tabela %>%
+  filter(gender == 'Female') %>% 
+  group_by(rs9592802) %>%
+  summarise(n = n())
+
+ggplot(delta_long_tabela %>% 
+         filter (gender == 'Female'),
+       aes(x = factor(rs9592802),
+           y = delta_ni_cerebralwhitemattervol),
+       ) +
+  
+  coord_cartesian(ylim = c(-21000, 40000)) +
+  
+  scale_x_discrete(labels = c('0' = '0/0', '1' = '0/1', '2' = '1/1')) +
+  
+  geom_point(aes(color = gender),
+             size = 2,
+             alpha = 0.7,
+             position = position_jitter(width = 0.15)) +
+  
+  stat_summary(aes(color = 'Média'),
+               fun = mean,
+               geom = "crossbar",
+               width = 0.5,
+               fatten = 0,
+               linewidth = 1) +
+  
+  geom_text(data = n_genotipo,
+            aes(x = factor(rs9592802),
+                y = -Inf,
+                label = paste0("n = ", n)),
+            inherit.aes = FALSE,
+            vjust = -18,
+            size = 3.5) +
+  
+  labs(title = 'Variação do Volume da substância branca x rs9592802',
+       subtitle = expression(
+         'Freq. allele C = 30,70% / ' *
+          p[hwe] * ' = 0.3488 / ' *
+          p[asoc] * ' = 0.0287 / ' *
+          'β = 2392.643'
+         ),
+       x = 'rs9592802',
+       y = 'Volume da substância branca (mm³)') +
+  
+  scale_color_manual(values = c(
+  "Média" = "black",
+  "Male"  = "#4E79A7",
+  "Female" = "#E15759"
+  )) +
+  
+  theme_minimal(base_size = 12) +
+  
+  theme(
+    plot.title   = element_text(
+      hjust = 0.5,
+      size = 13,
+      face = "bold"
+      ),
+    plot.subtitle = element_text(
+      hjust = 0.5,
+      size  = 11,
+      face  = "italic",
+      margin = margin(b = 10)
+      ),
+    axis.title.x = element_text(
+      face = "bold",
+      size = 10,
+      margin = margin(t = 10)
+      ),
+    axis.title.y = element_text(
+      face = "bold",
+      size = 10,
+      margin = margin(r = 10)
+      ),
+    
+    legend.position = "top",
+    legend.title = element_blank(),
+    legend.text  = element_text(size = 10),
+    plot.margin = margin(10, 10, 10, 10)
+  )
+```
+
+```{r}
+#| label: Long_female_scatterplot - rs490752
+library(ggplot2)
+library(dplyr)
+
+n_genotipo <- delta_long_tabela %>%
+  filter(gender == 'Female') %>% 
+  group_by(rs490752) %>%
+  summarise(n = n())
+
+ggplot(delta_long_tabela %>% 
+         filter (gender == 'Female'),
+       aes(x = factor(rs490752),
+           y = delta_ni_cerebralwhitemattervol),
+       ) +
+  
+  coord_cartesian(ylim = c(-21000, 40000)) +
+  
+  scale_x_discrete(labels = c('0' = '0/0', '1' = '0/1', '2' = '1/1')) +
+
+  geom_point(aes(color = gender),
+             size = 2,
+             alpha = 0.7,
+             position = position_jitter(width = 0.15)) +
+  
+  stat_summary(aes(color = 'Média'),
+               fun = mean,
+               geom = "crossbar",
+               width = 0.5,
+               fatten = 0,
+               linewidth = 1) +
+  
+  geom_text(data = n_genotipo,
+            aes(x = factor(rs490752),
+                y = -Inf,
+                label = paste0("n = ", n)),
+            inherit.aes = FALSE,
+            vjust = -18,
+            size = 3.5) +
+  
+  labs(title = 'Variação do Volume da substância branca x rs490752',
+       subtitle = expression(
+         'Freq. allele A = 34,43% / ' *
+          p[hwe] * ' = 0.2865 / ' *
+          p[asoc] * ' = 0.0456 / ' *
+          'β = 2019.051'
+         ),
+       x = 'rs490752',
+       y = 'Volume da substância branca (mm³)') +
+  
+  scale_color_manual(values = c(
+  "Média" = "black",
+  "Male"  = "#4E79A7",
+  "Female" = "#E15759"
+  )) +
+  
+  theme_minimal(base_size = 12) +
+  
+  theme(
+    plot.title   = element_text(
+      hjust = 0.5,
+      size = 13,
+      face = "bold"
+      ),
+    plot.subtitle = element_text(
+      hjust = 0.5,
+      size  = 11,
+      face  = "italic",
+      margin = margin(b = 10)
+      ),
+    axis.title.x = element_text(
+      face = "bold",
+      size = 10,
+      margin = margin(t = 10)
+      ),
+    axis.title.y = element_text(
+      face = "bold",
+      size = 10,
+      margin = margin(r = 10)
+      ),
+    
+    legend.position = "top",
+    legend.title = element_blank(),
+    legend.text  = element_text(size = 10),
+    plot.margin = margin(10, 10, 10, 10)
+  )
+```
+
+Taxa de crescimento - gráfico de dispersão
+
+```{r}
+#| label: gr_female_scatterplot - rs9592802
+library(ggplot2)
+library(dplyr)
+
+n_genotipo <- brower_long_tabela %>%
+  filter(gender == 'Female') %>% 
+  group_by(rs9592802) %>%
+  summarise(n = n())
+
+ggplot(brower_long_tabela %>% 
+         filter (gender == 'Female'),
+       aes(x = factor(rs9592802),
+           y = gr_ni_cerebralwhitemattervol),
+       ) +
+  
+  coord_cartesian(ylim = c(-6000, 12000)) +
+  
+  scale_x_discrete(labels = c('0' = '0/0', '1' = '0/1', '2' = '1/1')) +
+
+  geom_point(aes(color = gender),
+             size = 2,
+             alpha = 0.7,
+             position = position_jitter(width = 0.15)) +
+  
+  stat_summary(aes(color = 'Média'),
+               fun = mean,
+               geom = "crossbar",
+               width = 0.5,
+               fatten = 0,
+               linewidth = 1) +
+  
+  geom_text(data = n_genotipo,
+            aes(x = factor(rs9592802),
+                y = -Inf,
+                label = paste0("n = ", n)),
+            inherit.aes = FALSE,
+            vjust = -18,
+            size = 3.5) +
+  
+  labs(title = 'Taxa de crescimento da substância branca x rs9592802',
+       subtitle = expression(
+         'Freq. allele C = 30,70% / ' *
+          p[hwe] * ' = 0.3488 / ' *
+          p[asoc] * ' = 0.0365 / ' *
+          'β = 683.0509'
+         ),
+       x = 'rs9592802',
+       y = 'Taxa de crescimento da substância branca (mm³/ano)') +
+  
+  scale_color_manual(values = c(
+  "Média" = "black",
+  "Male"  = "#4E79A7",
+  "Female" = "#E15759"
+  )) +
+  
+  theme_minimal(base_size = 12) +
+  
+  theme(
+    plot.title   = element_text(
+      hjust = 0.5,
+      size = 13,
+      face = "bold"
+      ),
+    plot.subtitle = element_text(
+      hjust = 0.5,
+      size  = 11,
+      face  = "italic",
+      margin = margin(b = 10)
+      ),
+    axis.title.x = element_text(
+      face = "bold",
+      size = 10,
+      margin = margin(t = 10)
+      ),
+    axis.title.y = element_text(
+      face = "bold",
+      size = 10,
+      hjust = 0.3,
+      margin = margin(r = 10)
+      ),
+    
+    legend.position = "top",
+    legend.title = element_blank(),
+    legend.text  = element_text(size = 10),
+    plot.margin = margin(10, 10, 10, 10)
+  )
+```
+
+```{r}
+#| label: gr_female_scatterplot - rs17809993
+library(ggplot2)
+library(dplyr)
+
+n_genotipo <- brower_long_tabela %>%
+  filter(gender == 'Female') %>% 
+  group_by(rs17809993) %>%
+  summarise(n = n())
+
+ggplot(brower_long_tabela %>% 
+         filter (gender == 'Female'),
+       aes(x = factor(rs17809993),
+           y = gr_ni_cortexvol),
+       ) +
+  
+  coord_cartesian(ylim = c(-30000, 10000)) +
+  
+  scale_x_discrete(labels = c('0' = '0/0', '1' = '0/1', '2' = '1/1')) +
+
+  geom_point(aes(color = gender),
+             size = 2,
+             alpha = 0.7,
+             position = position_jitter(width = 0.15)) +
+  
+  stat_summary(aes(color = 'Média'),
+               fun = mean,
+               geom = "crossbar",
+               width = 0.5,
+               fatten = 0,
+               linewidth = 1) +
+  
+  geom_text(data = n_genotipo,
+            aes(x = factor(rs17809993),
+                y = -Inf,
+                label = paste0("n = ", n)),
+            inherit.aes = FALSE,
+            vjust = -18,
+            size = 3.5) +
+  
+  labs(title = 'Taxa de crescimento do cortex x rs17809993',
+       subtitle = expression(
+         'Freq. allele T = 4,72% / ' *
+          p[hwe] * ' = 1 / ' *
+          p[asoc] * ' = 0.0230 / ' *
+          'β = -2736.9004'
+         ),
+       x = 'rs17809993',
+       y = 'Taxa de crescimento do cortex (mm³/ano)') +
+  
+  scale_color_manual(values = c(
+  "Média" = "black",
+  "Male"  = "#4E79A7",
+  "Female" = "#E15759"
+  )) +
+  
+  theme_minimal(base_size = 12) +
+  
+  theme(
+    plot.title   = element_text(
+      hjust = 0.5,
+      size = 13,
+      face = "bold"
+      ),
+    plot.subtitle = element_text(
+      hjust = 0.5,
+      size  = 11,
+      face  = "italic",
+      margin = margin(b = 10)
+      ),
+    axis.title.x = element_text(
+      face = "bold",
+      size = 10,
+      margin = margin(t = 10)
+      ),
+    axis.title.y = element_text(
+      face = "bold",
+      size = 10,
+      hjust = 0.3,
+      margin = margin(r = 10)
+      ),
+    
+    legend.position = "top",
+    legend.title = element_blank(),
+    legend.text  = element_text(size = 10),
+    plot.margin = margin(10, 10, 10, 10)
+  )
+```
+
+```{r}
+#| label: gr_female_scatterplot - rs7926036
+library(ggplot2)
+library(dplyr)
+
+n_genotipo <- brower_long_tabela %>%
+  filter(gender == 'Female') %>% 
+  group_by(rs7926036) %>%
+  summarise(n = n())
+
+ggplot(brower_long_tabela %>% 
+         filter (gender == 'Female'),
+       aes(x = factor(rs7926036),
+           y = gr_ni_cortexvol),
+       ) +
+  
+  coord_cartesian(ylim = c(-30000, 10000)) +
+  
+  scale_x_discrete(labels = c('0' = '0/0', '1' = '0/1', '2' = '1/1')) +
+
+  geom_point(aes(color = gender),
+             size = 2,
+             alpha = 0.7,
+             position = position_jitter(width = 0.15)) +
+  
+  stat_summary(aes(color = 'Média'),
+               fun = mean,
+               geom = "crossbar",
+               width = 0.5,
+               fatten = 0,
+               linewidth = 1) +
+  
+  geom_text(data = n_genotipo,
+            aes(x = factor(rs7926036),
+                y = -Inf,
+                label = paste0("n = ", n)),
+            inherit.aes = FALSE,
+            vjust = -18,
+            size = 3.5) +
+  
+  labs(title = 'Taxa de crescimento do cortex x rs7926036',
+       subtitle = expression(
+         'Freq. allele A = 7,53% / ' *
+          p[hwe] * ' =  0.1985 / ' *
+          p[asoc] * ' = 0.0266 / ' *
+          'β = -2226.9012'
+         ),
+       x = 'rs7926036',
+       y = 'Taxa de crescimento do cortex (mm³/ano)') +
+  
+  scale_color_manual(values = c(
+  "Média" = "black",
+  "Male"  = "#4E79A7",
+  "Female" = "#E15759"
+  )) +
+  
+  theme_minimal(base_size = 12) +
+  
+  theme(
+    plot.title   = element_text(
+      hjust = 0.5,
+      size = 13,
+      face = "bold"
+      ),
+    plot.subtitle = element_text(
+      hjust = 0.5,
+      size  = 11,
+      face  = "italic",
+      margin = margin(b = 10)
+      ),
+    axis.title.x = element_text(
+      face = "bold",
+      size = 10,
+      margin = margin(t = 10)
+      ),
+    axis.title.y = element_text(
+      face = "bold",
+      size = 10,
+      hjust = 0.3,
+      margin = margin(r = 10)
+      ),
+    
+    legend.position = "top",
+    legend.title = element_blank(),
+    legend.text  = element_text(size = 10),
+    plot.margin = margin(10, 10, 10, 10)
+  )
+```
