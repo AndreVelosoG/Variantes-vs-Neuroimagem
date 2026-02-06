@@ -5,7 +5,7 @@ format: html
 editor: visual
 ---
 
-## Script Geral
+##--------------------------------------------- Script Geral ---------------------------------------------##
 
 ```{r}
 ##1. NEUROIMAGEM
@@ -121,7 +121,7 @@ str(ids_1waves)
 ##262 indivíduos com 1 wave
 ```
 
-## Modelo aditivo
+##--------------------------------------------- Modelo aditivo -------------------------------------------------------##
 
 Cross sectional - modelo aditivo
 
@@ -651,7 +651,7 @@ results_df <- bind_rows(results_df)
 gr_sex_signif_results <- results_df %>% filter(p_value < 0.05)
 ```
 
-## Gráfico de dispersão variantes
+##--------------------------------------------- Gráfico de dispersão variantes ---------------------------------------------##
 
 Transversal - gráfico de dispersão
 
@@ -1274,3 +1274,4 @@ ggplot(brower_long_tabela %>%
     plot.margin = margin(10, 10, 10, 10)
   )
 ```
+
